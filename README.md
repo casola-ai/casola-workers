@@ -4,13 +4,41 @@ SDK and reference workers for building GPU inference containers on the [Casola](
 
 ## What's included
 
-- **`casola_worker/`** — Python SDK providing WebSocket transport, system metrics, and GPU health checks
 - **`vllm/`** — Reference vLLM worker (standard LLM inference)
 - **`vllm-omni/`** — Reference vLLM-Omni worker (multi-modal: TTS, image, video)
+- **`test-server/`** — Local test server that simulates the Casola queue and REST API
+- **`integration-test/`** — Mock worker for end-to-end testing
 
-## Quick start
+## Quick start (local testing)
 
-Build and run the vLLM worker:
+Run a full local loop — test server, mock worker, and a request — with no cloud dependencies:
+
+```bash
+# Install the test server and mock worker
+pip install -e "test-server/.[dev]"
+pip install -r integration-test/requirements.txt
+
+# Terminal 1 — start the test server
+python -m casola_test_server.app
+
+# Terminal 2 — start the mock worker
+CASOLA_WS_URL=ws://localhost:8788 \
+CASOLA_CONFIG_ID=default \
+CASOLA_INSTANCE_ID=local-worker \
+CASOLA_SIMULATED_EXECUTION_TIME=0.1 \
+python integration-test/worker.py
+
+# Terminal 3 — send a request
+curl -s http://localhost:8788/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"test","messages":[{"role":"user","content":"hello"}]}' | python -m json.tool
+```
+
+See [`test-server/README.md`](test-server/README.md) for all available endpoints.
+
+## Deploying to Casola
+
+Build and run the vLLM worker with a GPU:
 
 ```bash
 docker build -t casola-vllm -f vllm/Dockerfile .
@@ -48,20 +76,28 @@ transport.on_job = my_process_function
 transport.start()  # blocking
 ```
 
+Test your worker locally by pointing it at the test server:
+
+```bash
+CASOLA_WS_URL=ws://localhost:8788 \
+CASOLA_CONFIG_ID=default \
+python your_worker.py
+```
+
 ## Project structure
 
 ```
-casola_worker/        # SDK package
-  transport.py        # WebSocket transport (queue connection, job dispatch)
-  system_metrics.py   # GPU/CPU/memory metrics reporter
-  gpu_health.py       # Pre-startup GPU health checks
 vllm/                 # Standard vLLM worker
   Dockerfile
   worker.py
   entrypoint.sh
 vllm-omni/            # Multi-modal vLLM worker
   Dockerfile
-pyproject.toml        # Package metadata
+test-server/          # Local test server (simulates queue + REST API)
+  casola_test_server/
+  tests/
+integration-test/     # Mock worker for E2E testing
+  worker.py
 ```
 
 ## License

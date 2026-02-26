@@ -1,0 +1,50 @@
+#!/bin/bash
+
+set -e
+
+IMAGE_NAME="${IMAGE_NAME:-ghcr.io/casola-ai/worker-integration-test}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+
+# Build from workers/ root so Dockerfile can access casola_worker/
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+docker build --platform linux/amd64 -t "${IMAGE_NAME}:${IMAGE_TAG}" -f "${REPO_ROOT}/integration-test/Dockerfile" "${REPO_ROOT}"
+
+echo "Pushing Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+
+echo ""
+echo "Build complete!"
+echo ""
+echo "To run the container:"
+echo "  docker run \\"
+echo "    -e CASOLA_API_URL=<api_url> \\"
+echo "    -e CASOLA_API_TOKEN=<api_token> \\"
+echo "    ${IMAGE_NAME}:${IMAGE_TAG}"
+echo ""
+echo "Required environment variables:"
+echo "  CASOLA_WS_URL           - WebSocket URL for queue connection"
+echo ""
+echo "Optional environment variables:"
+echo "  CASOLA_API_URL          - API base URL (for heartbeats)"
+echo "  CASOLA_API_TOKEN        - Bearer token for API authentication (for heartbeats)"
+echo "  CASOLA_INSTANCE_ID      - Custom instance ID, also used as worker_id (default: vast-\$CONTAINER_ID)"
+echo "  CASOLA_QUEUE_ID         - Queue ID for this worker (default: test-queue)"
+echo "  CASOLA_HEARTBEAT_INTERVAL - Heartbeat interval in seconds (default: 60)"
+echo "  CASOLA_MAX_JOBS         - Maximum concurrent jobs (default: 1)"
+echo "  CASOLA_LEASE_SECONDS    - Job lease duration in seconds (default: 30)"
+echo "  CASOLA_RENEW_LEASE_AFTER - Renew lease after this many seconds (default: 80% of lease_seconds)"
+echo "  CASOLA_SIMULATED_EXECUTION_TIME - Simulated job execution time in seconds (default: 2.0)"
+echo "  CASOLA_SIMULATED_ERROR_RATE - Probability of simulated job failure, 0.0-1.0 (default: 0.0)"
+echo "  CASOLA_SHUTDOWN_GRACE_PERIOD - Time to wait for job completion on shutdown (default: 5.0)"
+echo ""
+echo "Example:"
+echo "  docker run \\"
+echo "    -e CASOLA_API_URL=https://api.example.com \\"
+echo "    -e CASOLA_API_TOKEN=your-api-token \\"
+echo "    -e CASOLA_INSTANCE_ID=test-worker-1 \\"
+echo "    -e CASOLA_QUEUE_ID=test-queue \\"
+echo "    -e CASOLA_SIMULATED_EXECUTION_TIME=3.0 \\"
+echo "    -e CASOLA_SIMULATED_ERROR_RATE=0.1 \\"
+echo "    ${IMAGE_NAME}:${IMAGE_TAG}"

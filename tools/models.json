@@ -1,0 +1,30 @@
+{
+  "wan2.2-ti2v-5b": {
+    "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    "base": "vllm-omni"
+  },
+  "qwen-image-edit-2511": {
+    "repo": "Qwen/Qwen-Image-Edit-2511",
+    "base": "vllm-omni"
+  },
+  "qwen3-0.6b-fp8": {
+    "repo": "Qwen/Qwen3-0.6B-FP8",
+    "base": "vllm"
+  },
+  "qwen3-tts-1.7b": {
+    "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "base": "vllm-omni"
+  },
+  "whisper-large-v3": {
+    "repo": "openai/whisper-large-v3",
+    "base": "vllm"
+  },
+  "qwen-image-2512": {
+    "repo": "Qwen/Qwen-Image-2512",
+    "base": "vllm-omni"
+  },
+  "wan2.2-s2v-14b": {
+    "repo": "Wan-AI/Wan2.2-S2V-14B",
+    "base": "vllm-omni"
+  }
+}

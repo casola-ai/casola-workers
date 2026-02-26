@@ -1,0 +1,35 @@
+{
+  "comfyui_args": ["--fp8_e4m3fn-unet", "--lowvram"],
+  "image_sizes": {
+    "square_hd": [1024, 1024],
+    "square": [512, 512],
+    "portrait_4_3": [768, 1024],
+    "portrait_16_9": [768, 1344],
+    "landscape_4_3": [1024, 768],
+    "landscape_16_9": [1344, 768]
+  },
+  "defaults": {
+    "image_size": "square_hd",
+    "num_inference_steps": 28,
+    "guidance_scale": 5.0,
+    "num_images": 1
+  },
+  "workflow_params": {
+    "positive_prompt_node": "3",
+    "positive_prompt_field": ["inputs", "text"],
+    "negative_prompt_node": "4",
+    "negative_prompt_field": ["inputs", "text"],
+    "width_node": "5",
+    "width_field": ["inputs", "width"],
+    "height_node": "5",
+    "height_field": ["inputs", "height"],
+    "batch_size_node": "5",
+    "batch_size_field": ["inputs", "batch_size"],
+    "steps_node": "6",
+    "steps_field": ["inputs", "steps"],
+    "cfg_node": "6",
+    "cfg_field": ["inputs", "cfg"],
+    "seed_node": "6",
+    "seed_field": ["inputs", "seed"]
+  }
+}

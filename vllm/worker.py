@@ -513,10 +513,12 @@ class VLLMWorker:
             "model": self.vllm_served_model_name,
             "messages": messages,
             "temperature": kwargs.get("temperature", 0.7),
-            "max_tokens": kwargs.get("max_tokens", 512),
             "top_p": kwargs.get("top_p", 1.0),
             "stream": False,
         }
+
+        if "max_tokens" in kwargs:
+            completion_params["max_tokens"] = kwargs["max_tokens"]
 
         if "frequency_penalty" in kwargs:
             completion_params["frequency_penalty"] = kwargs["frequency_penalty"]
@@ -914,9 +916,11 @@ class VLLMWorker:
                 completion_kwargs = {
                     "model": self.vllm_served_model_name,
                     "temperature": payload.get("temperature", 0.7),
-                    "max_tokens": payload.get("max_tokens", 512),
                     "top_p": payload.get("top_p", 1.0),
                 }
+
+                if "max_tokens" in payload:
+                    completion_kwargs["max_tokens"] = payload["max_tokens"]
 
                 if "frequency_penalty" in payload:
                     completion_kwargs["frequency_penalty"] = payload["frequency_penalty"]

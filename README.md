@@ -6,6 +6,7 @@ SDK and reference workers for building GPU inference containers on the [Casola](
 
 - **`vllm/`** — Reference vLLM worker (standard LLM inference)
 - **`vllm-omni/`** — Reference vLLM-Omni worker (multi-modal: TTS, image, video)
+- **`your-worker-name/`** — Minimal skeleton for building your own worker (start here)
 - **`test-server/`** — Local test server that simulates the Casola queue and REST API
 - **`integration-test/`** — Mock worker for end-to-end testing
 
@@ -87,6 +88,9 @@ python your_worker.py
 ## Project structure
 
 ```
+your-worker-name/     # Minimal worker skeleton (start here)
+  worker.py
+  README.md
 vllm/                 # Standard vLLM worker
   Dockerfile
   worker.py

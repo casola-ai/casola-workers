@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:v0.15.1
+FROM vllm/vllm-openai:v0.16.0
 
 WORKDIR /app
 
@@ -14,10 +14,16 @@ COPY vllm/requirements.txt .
 COPY casola_worker/requirements.txt ./worker-common-requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt -r worker-common-requirements.txt
 
+# SM120 (RTX 5090) -> SM100 FP4 monkey-patch — see #700
+COPY vllm/sm120_fp4_patch.py /tmp/_sm120_fp4_patch.py
+RUN site="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    cp /tmp/_sm120_fp4_patch.py "$site/_sm120_fp4_patch.py" && \
+    echo "import _sm120_fp4_patch" > "$site/sm120-fp4-patch.pth"
+
 COPY casola_worker/ ./casola_worker/
-COPY vllm/worker.py .
-COPY vllm/entrypoint.sh .
-RUN chmod +x worker.py entrypoint.sh
+COPY --chmod=+x vllm/worker.py .
+COPY --chmod=+x shared/entrypoint.sh ./shared/
+COPY --chmod=+x vllm/entrypoint.sh .
 
 ENV VLLM_HOST=127.0.0.1
 ENV VLLM_PORT=8000

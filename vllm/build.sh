@@ -2,15 +2,16 @@
 
 set -e
 
-IMAGE_NAME="${IMAGE_NAME:-ghcr.io/casola-ai/worker-vllm}"
+IMAGE_NAME="${IMAGE_NAME:-registry.casola-staging.net/casola-ai/worker-vllm}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 FULL_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 
 # Build from workers/ root so Dockerfile can access casola_worker/
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_CONTEXT="${SCRIPT_DIR}/.."
 
 echo "Building Docker image: ${FULL_IMAGE}"
-docker build --platform linux/amd64 -t "${FULL_IMAGE}" -f "${REPO_ROOT}/vllm/Dockerfile" "${REPO_ROOT}"
+docker build --platform linux/amd64 -t "${FULL_IMAGE}" -f "${SCRIPT_DIR}/Dockerfile" "${BUILD_CONTEXT}"
 
 echo "Pushing Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
 docker push "${IMAGE_NAME}:${IMAGE_TAG}"
@@ -22,15 +23,15 @@ if [ -n "${MODEL_IMAGE:-}" ]; then
   COMBO_IMAGE="${IMAGE_NAME}:${MODEL_LABEL}"
   echo ""
   echo "Building combo image: ${COMBO_IMAGE}"
-  "${REPO_ROOT}/tools/combine.sh" "${FULL_IMAGE}" "${MODEL_IMAGE}" "${COMBO_IMAGE}"
+  "${BUILD_CONTEXT}/tools/combine.sh" "${FULL_IMAGE}" "${MODEL_IMAGE}" "${COMBO_IMAGE}"
 fi
 
 echo ""
 echo "Build complete!"
 echo "Image: ${FULL_IMAGE}"
 echo ""
-echo "To push to registry:"
-echo "  docker push ${FULL_IMAGE}"
+echo "To upload to R2 registry (CI path):"
+echo "  workers/tools/r2-upload.sh ./image-oci casola-ai/worker-vllm \$TAG"
 echo ""
 echo "To run locally:"
 echo "  docker run -e CASOLA_API_URL=<url> -e CASOLA_API_TOKEN=<token> -e VLLM_MODEL=<model> ${FULL_IMAGE}"

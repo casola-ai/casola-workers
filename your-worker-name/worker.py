@@ -10,7 +10,7 @@ import os
 import signal
 import sys
 import threading
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -62,21 +62,21 @@ def heartbeat_loop(running: threading.Event) -> None:
 # -- Job handler --------------------------------------------------------------
 
 
-def process_job(job: Dict[str, Any], transport: QueueTransport) -> None:
+def process_job(job: dict[str, Any], transport: QueueTransport) -> None:
     """
     Called for each dispatched job. Runs in its own thread.
 
     `job` dict fields:
-        id         – unique job identifier
-        config_id  – the config this job was routed to
-        payload    – arbitrary dict from the caller (model inputs, params, etc.)
-        mode       – "transient" (fire-and-forget) or "persisted" (result stored)
-        fence_token – monotonic token for persisted-job lease correctness
+        id         - unique job identifier
+        config_id  - the config this job was routed to
+        payload    - arbitrary dict from the caller (model inputs, params, etc.)
+        mode       - "transient" (fire-and-forget) or "persisted" (result stored)
+        fence_token - monotonic token for persisted-job lease correctness
 
     Use `transport` to report results back to the queue:
-        transport.complete_job(job_id, result_dict)   – report success
-        transport.fail_job(job_id, "error message")   – report failure
-        transport.send_progress(job_id, progress=0.5) – progress / lease renewal
+        transport.complete_job(job_id, result_dict)   - report success
+        transport.fail_job(job_id, "error message")   - report failure
+        transport.send_progress(job_id, progress=0.5) - progress / lease renewal
 
     Lease renewal: The transport automatically renews leases for persisted jobs
     every 30 s. For long-running jobs you can also call `send_progress` manually

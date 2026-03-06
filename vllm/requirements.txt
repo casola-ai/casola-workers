@@ -1,3 +1,7 @@
 requests==2.31.0
 openai>=1.40.0
 websockets>=12.0
+# Audio support for Whisper (vllm[audio] deps — installed separately to avoid
+# reinstalling/conflicting with the vllm already baked into the base image)
+librosa
+soundfile

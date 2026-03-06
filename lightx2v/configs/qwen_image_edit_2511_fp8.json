@@ -1,0 +1,13 @@
+{
+    "infer_steps": 4,
+    "target_height": 1024,
+    "target_width": 1024,
+    "prompt_template_encode": "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+    "prompt_template_encode_start_idx": 64,
+    "sample_guide_scale": 1.0,
+    "enable_cfg": false,
+    "cpu_offload": false,
+    "dit_quantized": true,
+    "dit_quantized_ckpt": "lightx2v/Qwen-Image-Edit-2511-Lightning",
+    "dit_quant_scheme": "fp8-sgl"
+}

@@ -62,7 +62,7 @@ docker run --gpus all \
   -e CASOLA_QUEUE_ID=vllm-queue \
   -e VLLM_MODEL=meta-llama/Llama-2-7b-chat-hf \
   -e VLLM_EXTRA_ARGS="--gpu-memory-utilization 0.9" \
-  ghcr.io/casola-ai/worker-vllm:latest
+  registry.casola-staging.net/casola-ai/worker-vllm:latest
 ```
 
 ### Example with Hugging Face Token
@@ -77,7 +77,7 @@ docker run --gpus all \
   -e VLLM_MODEL=meta-llama/Llama-2-7b-chat-hf \
   -e HF_TOKEN=your-huggingface-token \
   -e VLLM_EXTRA_ARGS="--gpu-memory-utilization 0.9" \
-  ghcr.io/casola-ai/worker-vllm:latest
+  registry.casola-staging.net/casola-ai/worker-vllm:latest
 ```
 
 ## How It Works
@@ -243,7 +243,7 @@ docker run --gpus all \
   -e CASOLA_API_URL=https://api.example.com \
   -e CASOLA_API_TOKEN=your-api-token \
   -e VLLM_MODEL=mistralai/Mistral-7B-Instruct-v0.2 \
-  ghcr.io/casola-ai/worker-vllm:latest
+  registry.casola-staging.net/casola-ai/worker-vllm:latest
 
 # Test with multi-GPU setup
 docker run --gpus all \
@@ -251,7 +251,7 @@ docker run --gpus all \
   -e CASOLA_API_TOKEN=your-api-token \
   -e VLLM_MODEL=meta-llama/Llama-2-70b-chat-hf \
   -e VLLM_EXTRA_ARGS="--tensor-parallel-size 4" \
-  ghcr.io/casola-ai/worker-vllm:latest
+  registry.casola-staging.net/casola-ai/worker-vllm:latest
 ```
 
 ## Troubleshooting

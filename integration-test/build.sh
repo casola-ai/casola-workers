@@ -2,7 +2,7 @@
 
 set -e
 
-IMAGE_NAME="${IMAGE_NAME:-ghcr.io/casola-ai/worker-integration-test}"
+IMAGE_NAME="${IMAGE_NAME:-registry.casola-staging.net/casola-ai/worker-integration-test}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 
 # Build from workers/ root so Dockerfile can access casola_worker/
@@ -16,6 +16,9 @@ docker push "${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo ""
 echo "Build complete!"
+echo ""
+echo "To upload to R2 registry (CI path):"
+echo "  workers/tools/r2-upload.sh ./image-oci casola-ai/worker-integration-test \$TAG"
 echo ""
 echo "To run the container:"
 echo "  docker run \\"

@@ -2,7 +2,7 @@
 
 set -e
 
-IMAGE_NAME="${IMAGE_NAME:-ghcr.io/casola-ai/worker-vllm-omni}"
+IMAGE_NAME="${IMAGE_NAME:-registry.casola-staging.net/casola-ai/worker-vllm-omni}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 FULL_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 
@@ -30,6 +30,9 @@ fi
 echo ""
 echo "Build complete!"
 echo "Image: ${FULL_IMAGE}"
+echo ""
+echo "To upload to R2 registry (CI path):"
+echo "  workers/tools/r2-upload.sh ./image-oci casola-ai/worker-vllm-omni \$TAG"
 echo ""
 echo "To run locally:"
 echo "  docker run -e CASOLA_API_URL=<url> -e CASOLA_API_TOKEN=<token> -e VLLM_MODEL=<model> ${FULL_IMAGE}"

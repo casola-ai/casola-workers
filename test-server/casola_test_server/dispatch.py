@@ -114,17 +114,17 @@ class Dispatcher:
         worker.active_jobs.add(job_id)
         try:
             await worker.ws.send_json(assignment.model_dump())
-        except Exception:
+        except Exception as exc:
             worker.active_jobs.discard(job_id)
             self.pending_transient.pop(job_id, None)
-            raise RuntimeError("Failed to send job to worker")
+            raise RuntimeError("Failed to send job to worker") from exc
 
         try:
             result = await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError as exc:
             self.pending_transient.pop(job_id, None)
             worker.active_jobs.discard(job_id)
-            raise TimeoutError(f"Job {job_id} timed out after {timeout}s")
+            raise TimeoutError(f"Job {job_id} timed out after {timeout}s") from exc
 
         return result
 

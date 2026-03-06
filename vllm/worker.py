@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
 import base64
+import json
 import os
-import re
 import signal
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 from openai import OpenAI
@@ -17,50 +17,36 @@ from openai import OpenAI
 # Allow importing casola_worker from parent directory (local dev)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from casola_worker.config import build_transport_config
+from casola_worker.error_patterns import check_log_for_errors, compile_error_patterns
+from casola_worker.stream_aggregator import StreamChunkAggregator
 from casola_worker.system_metrics import SystemMetricsReporter
 from casola_worker.transport import QueueTransport, create_transport
 
+# vLLM-specific error patterns (appended to the shared base lists)
+_VLLM_FATAL_EXTRA = [
+    r"forward compatibility was attempted on non supported HW",
+    r"unsupported display driver / cuda driver combination",
+]
+
+_VLLM_RETRYABLE_EXTRA = [
+    r"RuntimeError.*initialization failed",
+    r"Engine core initialization failed",
+    r"Failed to load model",
+    r"Model .* does not exist",
+    r"AssertionError",
+    r"Failed to initialize",
+    r"Error loading model weights",
+    r"Failed core proc",
+    r"MaxRetryError.*huggingface\.co",
+    r"Failed to resolve.*huggingface\.co",
+    r"NameResolutionError.*huggingface\.co",
+    r"Name or service not known.*huggingface\.co",
+    r"Invalid repository ID or local directory",
+]
+
 
 class VLLMWorker:
-    # Regex patterns that indicate FATAL errors (permanent, host should be marked as bad)
-    # NOTE: Avoid broad patterns like "libcuda\.so", "cannot find -lcuda",
-    # "CUDA.*linker", "ld returned 1 exit status" — these false-positive on
-    # benign Triton JIT linker warnings during torch.compile.
-    FATAL_ERROR_PATTERNS = [
-        r"CUDA driver version is insufficient",
-        r"CUDA version.*incompatible",
-        r"cannot open shared object file.*libcuda",
-        r"Incompatible CUDA version",
-        r"forward compatibility was attempted on non supported HW",
-        r"unsupported display driver / cuda driver combination",
-    ]
-
-    # Regex patterns that indicate retryable errors (temporary, can retry on same or different host)
-    RETRYABLE_ERROR_PATTERNS = [
-        r"CUDA out of memory",
-        r"RuntimeError.*CUDA",
-        r"RuntimeError.*initialization failed",
-        r"Engine core initialization failed",
-        r"OutOfMemoryError",
-        r"Failed to load model",
-        r"Model .* does not exist",
-        r"Segmentation fault",
-        r"core dumped",
-        r"NCCL error",
-        r"AssertionError",
-        r"torch\.cuda\.OutOfMemoryError",
-        r"Cannot allocate memory",
-        r"GPU memory allocation failed",
-        r"Failed to initialize",
-        r"Error loading model weights",
-        r"Failed core proc",
-        r"MaxRetryError.*huggingface\.co",
-        r"Failed to resolve.*huggingface\.co",
-        r"NameResolutionError.*huggingface\.co",
-        r"Name or service not known.*huggingface\.co",
-        r"Invalid repository ID or local directory",
-    ]
-
     def __init__(self):
         self.api_url = os.environ.get("CASOLA_API_URL")
         self.api_token = os.environ.get("CASOLA_API_TOKEN")
@@ -107,7 +93,7 @@ class VLLMWorker:
         self.current_job_id = None
         self.job_lock = threading.Lock()
 
-        self.transport: Optional[QueueTransport] = None
+        self.transport: QueueTransport | None = None
 
         self.vllm_client = None
         self.vllm_process = None
@@ -117,23 +103,36 @@ class VLLMWorker:
         self.error_message = None
         self.error_is_fatal = False
 
+        # Timing: record container startup and scheduler creation timestamp
+        self.container_start_time = time.time()
+        self.vllm_start_time: float | None = None
+        created_at = os.environ.get("CASOLA_CREATED_AT")
+        self.scheduler_created_at: float | None = float(created_at) if created_at else None
+
         # Compile regex patterns for efficiency
-        self.compiled_fatal_patterns = [
-            re.compile(pattern, re.IGNORECASE) for pattern in self.FATAL_ERROR_PATTERNS
-        ]
-        self.compiled_retryable_patterns = [
-            re.compile(pattern, re.IGNORECASE) for pattern in self.RETRYABLE_ERROR_PATTERNS
-        ]
+        self.compiled_fatal_patterns, self.compiled_retryable_patterns = compile_error_patterns(
+            fatal_extra=_VLLM_FATAL_EXTRA,
+            retryable_extra=_VLLM_RETRYABLE_EXTRA,
+        )
 
         # Log shipping
-        self.log_buffer: List[Dict[str, Any]] = []
+        self.log_buffer: list[dict[str, Any]] = []
         self.log_lock = threading.Lock()
         self.last_log_flush = time.time()
         self.log_flush_interval = int(os.environ.get("CASOLA_LOG_FLUSH_INTERVAL", "30"))
         self.ws_url = os.environ.get("CASOLA_WS_URL", "")
 
+        # Stream chunk aggregation
+        self.stream_interval_ms = float(os.environ.get("CASOLA_STREAM_INTERVAL_MS", "0"))
+        self.stream_interval_max_ms = float(
+            os.environ.get("CASOLA_STREAM_INTERVAL_MAX_MS", str(self.stream_interval_ms))
+        )
+        self.stream_interval_ramp_tokens = int(
+            os.environ.get("CASOLA_STREAM_INTERVAL_RAMP_TOKENS", "0")
+        )
+
         # System metrics reporter (initialized in run() after engine is ready)
-        self.metrics_reporter: Optional[SystemMetricsReporter] = None
+        self.metrics_reporter: SystemMetricsReporter | None = None
 
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         signal.signal(signal.SIGINT, self._handle_shutdown)
@@ -181,8 +180,8 @@ class VLLMWorker:
         message: str,
         level: str = "info",
         source: str = "worker",
-        job_id: Optional[str] = None,
-        config_id: Optional[str] = None,
+        job_id: str | None = None,
+        config_id: str | None = None,
     ):
         """Log a message from the worker or subprocess (vLLM/ComfyUI)."""
         timestamp_s = int(time.time())
@@ -283,22 +282,52 @@ class VLLMWorker:
 
         self.log("=== End Environment Variables ===")
 
-    def _check_log_for_errors(self, line: str) -> Optional[tuple[str, bool]]:
-        """
-        Check if a log line matches any error patterns.
-        Returns tuple of (matched_pattern, is_fatal) if found, None otherwise.
-        """
-        # Check fatal patterns first
-        for pattern in self.compiled_fatal_patterns:
-            if pattern.search(line):
-                return (pattern.pattern, True)
+    def _check_log_for_errors(self, line: str) -> tuple[str, bool] | None:
+        """Check if a log line matches any error patterns."""
+        return check_log_for_errors(
+            line, self.compiled_fatal_patterns, self.compiled_retryable_patterns
+        )
 
-        # Check retryable patterns
-        for pattern in self.compiled_retryable_patterns:
-            if pattern.search(line):
-                return (pattern.pattern, False)
+    def _process_log_line(self, line_str: str, process: subprocess.Popen):
+        """Process a single log line: ship it and check for error patterns."""
+        # Determine log level from vLLM output patterns
+        level = "info"
+        if "ERROR" in line_str or "Error" in line_str:
+            level = "error"
+        elif "WARNING" in line_str or "Warning" in line_str:
+            level = "warning"
 
-        return None
+        # Ship to platform (via log() method which buffers and prints)
+        self.log(line_str, level=level, source="vllm")
+
+        # Check for error patterns
+        error_match = self._check_log_for_errors(line_str)
+        if error_match and not self.error_detected:
+            matched_pattern, is_fatal = error_match
+            self.error_detected = True
+            self.error_is_fatal = is_fatal
+            error_type = "FATAL" if is_fatal else "RETRYABLE"
+            self.error_message = (
+                f"{error_type} vLLM error detected (pattern: {matched_pattern}): {line_str}"
+            )
+            self.log(f"ERROR DETECTED: {self.error_message}", level="error")
+
+            # Send appropriate error heartbeat
+            status = "fatal" if is_fatal else "error"
+            self.send_heartbeat(status)
+
+            # Trigger shutdown
+            self.log(
+                f"Initiating worker shutdown due to {error_type} vLLM error",
+                level="error",
+            )
+            self.running = False
+
+            # Terminate vLLM process
+            try:
+                process.terminate()
+            except Exception:
+                pass
 
     def _monitor_vllm_logs(self, process: subprocess.Popen):
         """
@@ -315,44 +344,30 @@ class VLLMWorker:
                     if line:
                         line_str = line.strip()
                         if line_str:
-                            # Determine log level from vLLM output patterns
-                            level = "info"
-                            if "ERROR" in line_str or "Error" in line_str:
-                                level = "error"
-                            elif "WARNING" in line_str or "Warning" in line_str:
-                                level = "warning"
-
-                            # Ship to platform (via log() method which buffers and prints)
-                            self.log(line_str, level=level, source="vllm")
-
-                            # Check for error patterns
-                            error_match = self._check_log_for_errors(line_str)
-                            if error_match and not self.error_detected:
-                                matched_pattern, is_fatal = error_match
-                                self.error_detected = True
-                                self.error_is_fatal = is_fatal
-                                error_type = "FATAL" if is_fatal else "RETRYABLE"
-                                self.error_message = f"{error_type} vLLM error detected (pattern: {matched_pattern}): {line_str}"
-                                self.log(f"ERROR DETECTED: {self.error_message}", level="error")
-
-                                # Send appropriate error heartbeat
-                                status = "fatal" if is_fatal else "error"
-                                self.send_heartbeat(status)
-
-                                # Trigger shutdown
-                                self.log(
-                                    f"Initiating worker shutdown due to {error_type} vLLM error",
-                                    level="error",
-                                )
-                                self.running = False
-
-                                # Terminate vLLM process
-                                try:
-                                    process.terminate()
-                                except Exception:
-                                    pass
-
+                            self._process_log_line(line_str, process)
+                            if self.error_detected:
                                 break
+
+            # Drain remaining output after process exits
+            if process.stdout:
+                for line in process.stdout:
+                    line_str = line.strip()
+                    if line_str:
+                        self._process_log_line(line_str, process)
+
+            # If the process exited unexpectedly (not due to a matched error
+            # pattern or a graceful shutdown), send an error heartbeat so the
+            # scheduler can clean up.
+            if not self.error_detected and self.running and process.poll() is not None:
+                exit_code = process.returncode
+                if exit_code is not None and exit_code != 0:
+                    self.error_detected = True
+                    self.error_is_fatal = False
+                    self.error_message = f"vLLM process exited with code {exit_code}"
+                    self.log(self.error_message, level="error")
+                    self.send_heartbeat("error")
+                    self.running = False
+
         except Exception as e:
             self.log(f"Error in vLLM log monitor: {e}", level="error")
 
@@ -385,18 +400,23 @@ class VLLMWorker:
                 vllm_serve_command,
                 "serve",
                 vllm_model,
-                "--host",
-                vllm_host,
-                "--port",
-                vllm_port,
-                "--served-model-name",
-                vllm_served_model_name,
             ]
+            cmd.extend(
+                [
+                    "--host",
+                    vllm_host,
+                    "--port",
+                    vllm_port,
+                    "--served-model-name",
+                    vllm_served_model_name,
+                ]
+            )
 
             # Add extra args if provided
             if vllm_extra_args:
                 cmd.extend(vllm_extra_args.split())
 
+            self.vllm_start_time = time.time()
             self.log(f"Starting vLLM process: {' '.join(cmd)}")
 
             # Start vLLM with stderr redirected to stdout for unified log monitoring
@@ -444,6 +464,15 @@ class VLLMWorker:
 
         # 1. Wait for /health 200
         while time.time() - start_time < self.vllm_startup_timeout:
+            # Bail early if the process already died or the log monitor detected an error
+            if self.error_detected:
+                self.log("vLLM error detected during startup, aborting readiness wait")
+                return False
+            if self.vllm_process and self.vllm_process.poll() is not None:
+                self.log(
+                    f"vLLM process exited (code {self.vllm_process.returncode}) during startup"
+                )
+                return False
             if self.check_vllm_health():
                 self.log("vLLM health check passed (200 OK).")
                 break
@@ -503,7 +532,7 @@ class VLLMWorker:
     # since the server-side lease is 300s. Short jobs complete before the
     # first renewal fires, avoiding unnecessary renewals.
 
-    def execute_chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+    def execute_chat_completion(self, messages: list[dict[str, str]], **kwargs) -> dict[str, Any]:
         if not self.vllm_client:
             raise Exception("vLLM client not initialized")
 
@@ -535,7 +564,15 @@ class VLLMWorker:
             "choices": [
                 {
                     "index": choice.index,
-                    "message": {"role": choice.message.role, "content": choice.message.content},
+                    "message": {
+                        "role": choice.message.role,
+                        "content": choice.message.content,
+                        **(
+                            {"reasoning_content": choice.message.reasoning_content}
+                            if getattr(choice.message, "reasoning_content", None)
+                            else {}
+                        ),
+                    },
                     "finish_reason": choice.finish_reason,
                 }
                 for choice in response.choices
@@ -549,7 +586,7 @@ class VLLMWorker:
 
         return result
 
-    def execute_embeddings(self, input_data: Any, **kwargs) -> Dict[str, Any]:
+    def execute_embeddings(self, input_data: Any, **kwargs) -> dict[str, Any]:
         if not self.vllm_client:
             raise Exception("vLLM client not initialized")
 
@@ -587,7 +624,7 @@ class VLLMWorker:
             self.log(f"Embeddings execution failed: {e}")
             raise
 
-    def execute_tts(self, input_text: str, voice: str, **kwargs) -> Dict[str, Any]:
+    def execute_tts(self, input_text: str, voice: str, **kwargs) -> dict[str, Any]:
         if not self.vllm_client:
             raise Exception("vLLM client not initialized")
 
@@ -624,7 +661,60 @@ class VLLMWorker:
             self.log(f"TTS execution failed: {e}")
             raise
 
-    def execute_transcription(self, audio_base64: str, **kwargs) -> Dict[str, Any]:
+    @staticmethod
+    def _detect_audio_suffix(header: bytes) -> str:
+        """Return a file suffix based on magic bytes."""
+        if header[:4] == b"RIFF":
+            return ".wav"
+        if header[:4] == b"fLaC":
+            return ".flac"
+        if header[:4] == b"OggS":
+            return ".ogg"
+        if header[:3] == b"ID3" or header[:2] == b"\xff\xfb":
+            return ".mp3"
+        # WebM / Matroska (EBML header)
+        if header[:4] == b"\x1a\x45\xdf\xa3":
+            return ".webm"
+        if len(header) >= 8 and header[4:8] == b"ftyp":
+            return ".m4a"
+        return ".bin"
+
+    @staticmethod
+    def _convert_to_wav(src_path: str, log_fn) -> str:
+        """Convert an audio file to 16 kHz mono WAV using ffmpeg.
+
+        Returns the path to the converted WAV file (caller must delete).
+        """
+        import subprocess
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as dst:
+            dst_path = dst.name
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            src_path,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-f",
+            "wav",
+            dst_path,
+        ]
+        log_fn(f"Converting audio to WAV: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode != 0:
+            os.unlink(dst_path)
+            raise Exception(
+                f"ffmpeg conversion failed (rc={result.returncode}): "
+                f"{result.stderr.decode(errors='replace')[:500]}"
+            )
+        return dst_path
+
+    def execute_transcription(self, audio_base64: str, **kwargs) -> dict[str, Any]:
         if not self.vllm_client:
             raise Exception("vLLM client not initialized")
 
@@ -636,15 +726,27 @@ class VLLMWorker:
             # Decode base64 to bytes
             audio_bytes = base64.b64decode(audio_base64)
 
-            # Write to temp file (OpenAI client requires file path)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            # Detect actual audio format and write with correct suffix
+            suffix = self._detect_audio_suffix(audio_bytes[:16])
+            self.log(f"Detected audio format: {suffix} ({len(audio_bytes)} bytes)")
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(audio_bytes)
                 tmp_path = tmp.name
 
+            wav_path = None
             try:
+                # libsndfile (used by vLLM) only supports WAV, FLAC, OGG —
+                # convert anything else to WAV via ffmpeg
+                if suffix not in (".wav", ".flac", ".ogg"):
+                    wav_path = self._convert_to_wav(tmp_path, self.log)
+                    file_path = wav_path
+                else:
+                    file_path = tmp_path
+
                 transcription_params = {
                     "model": self.vllm_served_model_name,
-                    "file": open(tmp_path, "rb"),
+                    "file": open(file_path, "rb"),
                     "response_format": kwargs.get("response_format", "json"),
                 }
 
@@ -661,22 +763,40 @@ class VLLMWorker:
                 if isinstance(response, dict):
                     result = response
                 else:
-                    # For text format, wrap in expected structure
-                    result = {"text": str(response)}
+                    # The OpenAI client may return a Transcription object —
+                    # check for embedded errors (vLLM returns 200 with an
+                    # error payload when dependencies are missing).
+                    error = getattr(response, "error", None)
+                    if error:
+                        msg = (
+                            error.get("message", str(error))
+                            if isinstance(error, dict)
+                            else str(error)
+                        )
+                        raise Exception(f"vLLM transcription error: {msg}")
+                    if hasattr(response, "model_dump"):
+                        result = response.model_dump(exclude_none=True)
+                    else:
+                        result = {"text": str(response)}
 
                 self.log(f"Transcription completed: {result.get('text', '')[:100]}...")
                 return result
 
             finally:
-                # Clean up temp file
+                # Clean up temp files
                 os.unlink(tmp_path)
+                if wav_path and wav_path != tmp_path:
+                    try:
+                        os.unlink(wav_path)
+                    except OSError:
+                        pass
 
         except Exception as e:
             self.log(f"Transcription execution failed: {e}")
             raise
 
-    def execute_text_to_video(self, prompt: str, **kwargs) -> Dict[str, Any]:
-        """Generate a video from a text prompt via vLLM-Omni /v1/videos/generations."""
+    def execute_text_to_video(self, prompt: str, **kwargs) -> dict[str, Any]:
+        """Generate a video from a text prompt via vLLM-Omni POST /v1/videos."""
         num_frames = kwargs.get("num_frames", 81)
         width = kwargs.get("width", 1280)
         height = kwargs.get("height", 720)
@@ -688,7 +808,8 @@ class VLLMWorker:
 
         self.log(f"Executing T2V: prompt={prompt[:80]}..., {width}x{height}, {num_frames} frames")
 
-        request_body: Dict[str, Any] = {
+        # vLLM-Omni /v1/videos accepts multipart form-data
+        form_data: dict[str, Any] = {
             "model": self.vllm_served_model_name,
             "prompt": prompt,
             "n": 1,
@@ -700,14 +821,14 @@ class VLLMWorker:
             "response_format": "b64_json",
         }
         if negative_prompt:
-            request_body["negative_prompt"] = negative_prompt
+            form_data["negative_prompt"] = negative_prompt
         if seed is not None:
-            request_body["seed"] = seed
+            form_data["seed"] = seed
 
         start_time = time.time()
         response = requests.post(
-            f"{self.vllm_base_url}/videos/generations",
-            json=request_body,
+            f"{self.vllm_base_url}/videos",
+            data=form_data,
             timeout=900,
         )
         response.raise_for_status()
@@ -731,8 +852,8 @@ class VLLMWorker:
             "seed_used": seed_used,
         }
 
-    def execute_image_to_video(self, image_url: str, prompt: str = "", **kwargs) -> Dict[str, Any]:
-        """Generate a video from a source image via vLLM-Omni I2V pipeline."""
+    def execute_image_to_video(self, image_url: str, prompt: str = "", **kwargs) -> dict[str, Any]:
+        """Generate a video from a source image via vLLM-Omni POST /v1/videos."""
         num_frames = kwargs.get("num_frames", 81)
         width = kwargs.get("width", 1280)
         height = kwargs.get("height", 720)
@@ -746,18 +867,18 @@ class VLLMWorker:
 
         img_response = requests.get(image_url, timeout=30)
         img_response.raise_for_status()
-        img_b64 = base64.b64encode(img_response.content).decode("utf-8")
 
         content_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
         if content_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
             content_type = "image/jpeg"
+        ext = content_type.split("/")[-1]
 
-        request_body: Dict[str, Any] = {
+        # vLLM-Omni /v1/videos accepts multipart form-data with input_reference file
+        form_data: dict[str, Any] = {
             "model": self.vllm_served_model_name,
             "prompt": prompt or "Animate this image naturally",
             "n": 1,
             "size": f"{width}x{height}",
-            "image": f"data:{content_type};base64,{img_b64}",
             "num_frames": num_frames,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
@@ -765,14 +886,15 @@ class VLLMWorker:
             "response_format": "b64_json",
         }
         if negative_prompt:
-            request_body["negative_prompt"] = negative_prompt
+            form_data["negative_prompt"] = negative_prompt
         if seed is not None:
-            request_body["seed"] = seed
+            form_data["seed"] = seed
 
         start_time = time.time()
         response = requests.post(
-            f"{self.vllm_base_url}/videos/generations",
-            json=request_body,
+            f"{self.vllm_base_url}/videos",
+            data=form_data,
+            files={"input_reference": (f"image.{ext}", img_response.content, content_type)},
             timeout=900,
         )
         response.raise_for_status()
@@ -796,7 +918,7 @@ class VLLMWorker:
             "seed_used": seed_used,
         }
 
-    def process_job(self, job: Dict[str, Any]) -> bool:
+    def process_job(self, job: dict[str, Any]) -> bool:
         job_id = job.get("id")
         config_id = job.get("config_id")
         payload = job.get("payload", {})
@@ -929,17 +1051,42 @@ class VLLMWorker:
                 if "stop" in payload:
                     completion_kwargs["stop"] = payload["stop"]
 
-                completion_result = self.execute_chat_completion(messages, **completion_kwargs)
+                # Streaming: send chunks via WebSocket for transient jobs
+                mode = job.get("mode", "transient")
+                if payload.get("stream") and mode == "transient":
+                    completion_kwargs["stream"] = True
+                    completion_kwargs["stream_options"] = {"include_usage": True}
+                    stream = self.vllm_client.chat.completions.create(
+                        messages=messages, **completion_kwargs
+                    )
+                    aggregator = StreamChunkAggregator(
+                        self.stream_interval_ms,
+                        self.stream_interval_max_ms,
+                        self.stream_interval_ramp_tokens,
+                    )
+                    for chunk in stream:
+                        chunk_dict = chunk.model_dump()
+                        for out in aggregator.add(chunk_dict):
+                            is_done = (
+                                out.get("choices")
+                                and out["choices"][0].get("finish_reason") is not None
+                            )
+                            self.transport.send_stream_chunk(job_id, json.dumps(out), done=is_done)
+                    for out in aggregator.finish():
+                        self.transport.send_stream_chunk(job_id, json.dumps(out), done=False)
+                    result = True
+                else:
+                    completion_result = self.execute_chat_completion(messages, **completion_kwargs)
 
-                result_data = {
-                    "status": "success",
-                    "config_id": config_id,
-                    "task": task or "openai/chat-completion",
-                    "completion": completion_result,
-                    "processed_at": datetime.now().isoformat(),
-                }
+                    result_data = {
+                        "status": "success",
+                        "config_id": config_id,
+                        "task": task or "openai/chat-completion",
+                        "completion": completion_result,
+                        "processed_at": datetime.now().isoformat(),
+                    }
 
-                result = self.transport.complete_job(job_id, result_data)
+                    result = self.transport.complete_job(job_id, result_data)
             elif task == "fal/text-to-video":
                 prompt = payload.get("prompt", "")
                 if not prompt:
@@ -961,7 +1108,6 @@ class VLLMWorker:
                     "status": "success",
                     "config_id": config_id,
                     "task": task,
-                    "video_b64": video_result["video_b64"],
                     "width": video_result["width"],
                     "height": video_result["height"],
                     "num_frames": video_result["num_frames"],
@@ -971,6 +1117,14 @@ class VLLMWorker:
                     "seed_used": video_result.get("seed_used"),
                     "processed_at": datetime.now().isoformat(),
                 }
+
+                if self.transport.has_media_upload_urls(job_id):
+                    video_bytes = base64.b64decode(video_result["video_b64"])
+                    self.transport.upload_to_r2(job_id, 0, video_bytes, "video/mp4")
+                    result_data["video_content_type"] = "video/mp4"
+                    result_data["media_count"] = 1
+                else:
+                    result_data["video_b64"] = video_result["video_b64"]
 
                 result = self.transport.complete_job(job_id, result_data)
 
@@ -996,7 +1150,6 @@ class VLLMWorker:
                     "status": "success",
                     "config_id": config_id,
                     "task": task,
-                    "video_b64": video_result["video_b64"],
                     "width": video_result["width"],
                     "height": video_result["height"],
                     "num_frames": video_result["num_frames"],
@@ -1007,6 +1160,14 @@ class VLLMWorker:
                     "source_image_url": image_url,
                     "processed_at": datetime.now().isoformat(),
                 }
+
+                if self.transport.has_media_upload_urls(job_id):
+                    video_bytes = base64.b64decode(video_result["video_b64"])
+                    self.transport.upload_to_r2(job_id, 0, video_bytes, "video/mp4")
+                    result_data["video_content_type"] = "video/mp4"
+                    result_data["media_count"] = 1
+                else:
+                    result_data["video_b64"] = video_result["video_b64"]
 
                 result = self.transport.complete_job(job_id, result_data)
 
@@ -1060,7 +1221,6 @@ class VLLMWorker:
                     "status": "success",
                     "config_id": config_id,
                     "task": task,
-                    "video_b64": video_result["video_b64"],
                     "width": video_result["width"],
                     "height": video_result["height"],
                     "num_frames": video_result["num_frames"],
@@ -1072,6 +1232,14 @@ class VLLMWorker:
                     "source_image_url": image_url,
                     "processed_at": datetime.now().isoformat(),
                 }
+
+                if self.transport.has_media_upload_urls(job_id):
+                    video_bytes = base64.b64decode(video_result["video_b64"])
+                    self.transport.upload_to_r2(job_id, 0, video_bytes, "video/mp4")
+                    result_data["video_content_type"] = "video/mp4"
+                    result_data["media_count"] = 1
+                else:
+                    result_data["video_b64"] = video_result["video_b64"]
 
                 result = self.transport.complete_job(job_id, result_data)
 
@@ -1101,6 +1269,18 @@ class VLLMWorker:
 
             return result
 
+    def _on_first_active(self):
+        """Send first 'active' heartbeat and log startup timing breakdown."""
+        self.send_heartbeat("active")
+        now = time.time()
+        if self.scheduler_created_at:
+            self.log(f"Time since scheduler creation: {now - self.scheduler_created_at:.1f}s")
+        else:
+            self.log("Time since scheduler creation: unknown (CASOLA_CREATED_AT not set)")
+        self.log(f"Time since container startup: {now - self.container_start_time:.1f}s")
+        if self.vllm_start_time:
+            self.log(f"Time since vLLM process start: {now - self.vllm_start_time:.1f}s")
+
     def _heartbeat_loop(self):
         # We start this thread AFTER the initial checks in run(), so we just loop.
         while self.running:
@@ -1117,7 +1297,7 @@ class VLLMWorker:
             except Exception as e:
                 self.log(f"Error in heartbeat loop: {e}")
 
-    def _get_vllm_waiting_requests(self) -> Optional[int]:
+    def _get_vllm_waiting_requests(self) -> int | None:
         """Fetch vllm:num_requests_waiting from the vLLM Prometheus /metrics endpoint."""
         try:
             response = requests.get(f"{self.vllm_root_url}/metrics", timeout=2)
@@ -1132,9 +1312,9 @@ class VLLMWorker:
         except Exception:
             return None
 
-    def _collect_vllm_metrics(self) -> Dict[str, Any]:
+    def _collect_vllm_metrics(self) -> dict[str, Any]:
         """Collect vLLM engine metrics for the system metrics reporter."""
-        metrics: Dict[str, Any] = {}
+        metrics: dict[str, Any] = {}
         try:
             response = requests.get(f"{self.vllm_root_url}/metrics", timeout=2)
             if response.status_code != 200:
@@ -1193,16 +1373,22 @@ class VLLMWorker:
         # Print environment variables for debugging
         self.print_environment_variables()
 
-        # 1. Send "Starting" heartbeat immediately
+        # 1. Ship startup diagnostics (GPU/CUDA/model cache) into log buffer
+        from casola_worker.gpu_health import run_gpu_health_checks, run_startup_diagnostics
+
+        for line in run_startup_diagnostics():
+            self.log(line, source="diagnostics")
+
+        # 2. Send "Starting" heartbeat immediately
         self.send_heartbeat("starting")
 
-        # 2. Run pre-startup GPU health checks
-        from casola_worker.gpu_health import run_gpu_health_checks
-
+        # 3. Run pre-startup GPU health checks
         health_result = run_gpu_health_checks(
             expected_gpu_name=os.environ.get("CASOLA_EXPECTED_GPU_NAME"),
             expected_vram_gb=float(v) if (v := os.environ.get("CASOLA_EXPECTED_VRAM_GB")) else None,
         )
+        for detail in health_result.details:
+            self.log(detail, source="diagnostics")
         if not health_result.passed:
             self.error_message = health_result.error_message
             self.error_detected = True
@@ -1212,13 +1398,13 @@ class VLLMWorker:
             sys.exit(1)
         self.log(f"GPU health checks passed ({health_result.checks_run} checks)")
 
-        # 3. Start vLLM process with log monitoring
+        # 4. Start vLLM process with log monitoring
         if not self._start_vllm_process():
             self.log("Failed to start vLLM process")
             self.send_heartbeat("error")
             sys.exit(1)
 
-        # 4. Wait for vLLM to be healthy (checks /health 200)
+        # 5. Wait for vLLM to be healthy (checks /health 200)
         #    and initialize client
         if not self.wait_for_vllm_readiness():
             self.log("Failed to start: vLLM did not become healthy.")
@@ -1234,31 +1420,29 @@ class VLLMWorker:
                 self.vllm_process.wait(timeout=5)
             sys.exit(1)
 
-        # 5. Build transport config from env vars
-        config = {
-            "worker_id": self.worker_id,
-            "max_jobs": self.max_jobs,
-            "lease_seconds": self.lease_seconds,
-            "config_id": self.config_id,
-            "ws_url": os.environ.get("CASOLA_WS_URL", ""),
-            "capacity": int(os.environ.get("CASOLA_CAPACITY", "1")),
-            "api_token": self.api_token,
-        }
+        # 6. Build transport config from env vars
+        config = build_transport_config(
+            worker_id=self.worker_id,
+            config_id=self.config_id,
+            max_jobs=self.max_jobs,
+            lease_seconds=self.lease_seconds,
+            api_token=self.api_token,
+        )
 
         self.transport = create_transport(config)
         self.transport.on_job = self.process_job
-        self.transport.on_connected = lambda: self.send_heartbeat("active")
+        self.transport.on_connected = lambda: self._on_first_active()
 
-        # 6. Start heartbeat thread (optional — needs API URL/token)
+        # 7. Start heartbeat thread (optional — needs API URL/token)
         heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         if self.api_url and self.api_token:
             heartbeat_thread.start()
 
-        # 6b. Start log flush thread
+        # 7b. Start log flush thread
         log_flush_thread = threading.Thread(target=self._log_flush_loop, daemon=True)
         log_flush_thread.start()
 
-        # 6c. Start system metrics reporter
+        # 7c. Start system metrics reporter
         self.metrics_reporter = SystemMetricsReporter(
             instance_id=self.instance_id,
             queue_id=self.queue_id,

@@ -118,10 +118,10 @@ def create_app() -> FastAPI:
 
         try:
             result = await dispatcher.dispatch_transient(payload)
-        except RuntimeError:
-            raise HTTPException(503, detail="No worker available")
-        except TimeoutError as e:
-            raise HTTPException(504, detail=str(e))
+        except RuntimeError as exc:
+            raise HTTPException(503, detail="No worker available") from exc
+        except TimeoutError as exc:
+            raise HTTPException(504, detail=str(exc)) from exc
 
         if "_error" in result:
             raise HTTPException(502, detail=result["_error"])
@@ -148,10 +148,10 @@ def create_app() -> FastAPI:
 
         try:
             result = await dispatcher.dispatch_transient(payload)
-        except RuntimeError:
-            raise HTTPException(503, detail="No worker available")
-        except TimeoutError as e:
-            raise HTTPException(504, detail=str(e))
+        except RuntimeError as exc:
+            raise HTTPException(503, detail="No worker available") from exc
+        except TimeoutError as exc:
+            raise HTTPException(504, detail=str(exc)) from exc
 
         if "_error" in result:
             raise HTTPException(502, detail=result["_error"])
@@ -189,10 +189,10 @@ def create_app() -> FastAPI:
 
         try:
             result = await dispatcher.dispatch_transient(payload)
-        except RuntimeError:
-            raise HTTPException(503, detail="No worker available")
-        except TimeoutError as e:
-            raise HTTPException(504, detail=str(e))
+        except RuntimeError as exc:
+            raise HTTPException(503, detail="No worker available") from exc
+        except TimeoutError as exc:
+            raise HTTPException(504, detail=str(exc)) from exc
 
         if "_error" in result:
             raise HTTPException(502, detail=result["_error"])
@@ -243,10 +243,10 @@ def create_app() -> FastAPI:
 
         try:
             result = await dispatcher.dispatch_transient(payload)
-        except RuntimeError:
-            raise HTTPException(503, detail="No worker available")
-        except TimeoutError as e:
-            raise HTTPException(504, detail=str(e))
+        except RuntimeError as exc:
+            raise HTTPException(503, detail="No worker available") from exc
+        except TimeoutError as exc:
+            raise HTTPException(504, detail=str(exc)) from exc
 
         if "_error" in result:
             raise HTTPException(502, detail=result["_error"])
@@ -280,10 +280,10 @@ def create_app() -> FastAPI:
 
         try:
             result = await dispatcher.dispatch_transient(payload)
-        except RuntimeError:
-            raise HTTPException(503, detail="No worker available")
-        except TimeoutError as e:
-            raise HTTPException(504, detail=str(e))
+        except RuntimeError as exc:
+            raise HTTPException(503, detail="No worker available") from exc
+        except TimeoutError as exc:
+            raise HTTPException(504, detail=str(exc)) from exc
 
         if "_error" in result:
             raise HTTPException(502, detail=result["_error"])

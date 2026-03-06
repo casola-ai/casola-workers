@@ -53,7 +53,7 @@ docker run \
   -e CASOLA_QUEUE_ID=test-queue \
   -e CASOLA_SIMULATED_EXECUTION_TIME=3.0 \
   -e CASOLA_SIMULATED_ERROR_RATE=0.1 \
-  ghcr.io/casola-ai/worker-integration-test:latest
+  registry.casola-staging.net/casola-ai/worker-integration-test:latest
 ```
 
 ## How It Works
@@ -78,7 +78,7 @@ docker run \
 docker run --name test-worker \
   -e CASOLA_WS_URL=wss://us.casola-staging.net \
   -e CASOLA_QUEUE_ID=test-queue \
-  ghcr.io/casola-ai/worker-integration-test:latest
+  registry.casola-staging.net/casola-ai/worker-integration-test:latest
 
 # In another terminal, send SIGTERM
 docker stop test-worker

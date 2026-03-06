@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
@@ -58,10 +58,10 @@ class WorkerIntegrationTest:
         self.current_job_id = None
         self.job_lock = threading.Lock()
 
-        self.transport: Optional[QueueTransport] = None
+        self.transport: QueueTransport | None = None
 
         # Log shipping
-        self.log_buffer: List[Dict[str, Any]] = []
+        self.log_buffer: list[dict[str, Any]] = []
         self.log_lock_logs = threading.Lock()
         self.last_log_flush = time.time()
         self.log_flush_interval = int(os.environ.get("CASOLA_LOG_FLUSH_INTERVAL", "30"))
@@ -113,8 +113,8 @@ class WorkerIntegrationTest:
         message: str,
         level: str = "info",
         source: str = "worker",
-        job_id: Optional[str] = None,
-        config_id: Optional[str] = None,
+        job_id: str | None = None,
+        config_id: str | None = None,
     ):
         """Log a message from the worker."""
         timestamp_s = int(time.time())
@@ -261,7 +261,7 @@ class WorkerIntegrationTest:
             self.log(f"Failed to send heartbeat: {e}")
             return False
 
-    def process_job(self, job: Dict[str, Any]) -> bool:
+    def process_job(self, job: dict[str, Any]) -> bool:
         job_id = job.get("id")
         config_id = job.get("config_id")
         payload = job.get("payload", {})
@@ -277,14 +277,137 @@ class WorkerIntegrationTest:
         self.log(f"Processing job {job_id} (config_id: {config_id}, task: {task}, mode: {mode})")
 
         try:
+            import json
             import random
 
-            time.sleep(self.simulated_execution_time)
+            is_streaming = payload.get("stream", False)
+
+            # Simulate execution time for non-streaming requests only;
+            # streaming requests use per-chunk delays instead.
+            if not is_streaming:
+                time.sleep(self.simulated_execution_time)
 
             if random.random() < self.simulated_error_rate:
                 error_msg = f"Simulated error (error rate: {self.simulated_error_rate})"
                 self.log(f"Simulating error for job {job_id}: {error_msg}")
                 result = self.transport.fail_job(job_id, error_msg)
+
+            # === Streaming: chat completion ===
+            elif is_streaming and task == "openai/chat-completion":
+                messages = payload.get("messages", [])
+                last_message = messages[-1].get("content", "") if messages else ""
+                model = job.get("model_id", "mock-model")
+                completion_id = f"chatcmpl-mock-{job_id}"
+                response_text = f"Mock response to: {last_message[:500]}..."
+                words = response_text.split()
+
+                prompt_tokens = len(last_message.split()) if last_message else 0
+                completion_tokens = len(words)
+
+                # Role announcement chunk
+                role_chunk = json.dumps(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [
+                            {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                        ],
+                    }
+                )
+                self.transport.send_stream_chunk(job_id, role_chunk, done=False)
+
+                # Content chunks — one per word
+                for i, word in enumerate(words):
+                    token = word if i == 0 else f" {word}"
+                    content_chunk = json.dumps(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {"index": 0, "delta": {"content": token}, "finish_reason": None}
+                            ],
+                        }
+                    )
+                    self.transport.send_stream_chunk(job_id, content_chunk, done=False)
+                    time.sleep(0.05)
+
+                # Final chunk with finish_reason and usage
+                final_chunk = json.dumps(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                        },
+                    }
+                )
+                self.transport.send_stream_chunk(job_id, final_chunk, done=True)
+
+                self.log(f"Streamed chat completion for job {job_id} ({len(words)} chunks)")
+                with self.job_lock:
+                    self.current_job_id = None
+                return True
+
+            # === Streaming: TTS ===
+            elif is_streaming and task == "openai/audio-speech":
+                import base64
+                import struct
+
+                input_text = payload.get("input", "")
+                response_format = payload.get("response_format", "mp3")
+
+                # Generate same mock WAV as non-streaming path
+                num_samples = 1000
+                data_size = num_samples * 2
+                wav_header = struct.pack(
+                    "<4sI4s4sIHHIIHH4sI",
+                    b"RIFF",
+                    36 + data_size,
+                    b"WAVE",
+                    b"fmt ",
+                    16,
+                    1,
+                    1,
+                    44100,
+                    88200,
+                    2,
+                    16,
+                    b"data",
+                    data_size,
+                )
+                fake_audio = wav_header + b"\x00" * data_size
+                audio_b64 = base64.b64encode(fake_audio).decode("utf-8")
+
+                # Send base64 audio in ~512-char chunks
+                chunk_size = 512
+                for i in range(0, len(audio_b64), chunk_size):
+                    segment = audio_b64[i : i + chunk_size]
+                    is_last = i + chunk_size >= len(audio_b64)
+                    chunk_data = json.dumps(
+                        {
+                            "audio_base64": segment,
+                            "format": response_format,
+                            "index": i // chunk_size,
+                        }
+                    )
+                    self.transport.send_stream_chunk(job_id, chunk_data, done=is_last)
+                    if not is_last:
+                        time.sleep(0.01)
+
+                self.log(f"Streamed TTS for job {job_id} (input_length: {len(input_text)})")
+                with self.job_lock:
+                    self.current_job_id = None
+                return True
+
             else:
                 # Handle TTS tasks with mock audio response
                 if task == "openai/audio-speech":
@@ -431,7 +554,7 @@ class WorkerIntegrationTest:
                     import base64
 
                     # Small fake MP4 bytes (not a real video, just for data-path testing)
-                    fake_video = f"fake-video-t2v-{job_id}".encode("utf-8")
+                    fake_video = f"fake-video-t2v-{job_id}".encode()
                     video_b64 = base64.b64encode(fake_video).decode("utf-8")
 
                     result_data = {
@@ -461,7 +584,7 @@ class WorkerIntegrationTest:
 
                     import base64
 
-                    fake_video = f"fake-video-i2v-{job_id}".encode("utf-8")
+                    fake_video = f"fake-video-i2v-{job_id}".encode()
                     video_b64 = base64.b64encode(fake_video).decode("utf-8")
 
                     result_data = {
@@ -493,7 +616,7 @@ class WorkerIntegrationTest:
 
                     import base64
 
-                    fake_video = f"fake-video-s2v-{job_id}".encode("utf-8")
+                    fake_video = f"fake-video-s2v-{job_id}".encode()
                     video_b64 = base64.b64encode(fake_video).decode("utf-8")
 
                     result_data = {

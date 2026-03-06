@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any, Optional
+from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -46,8 +46,8 @@ class JobProgressMessage(BaseModel):
     type: str = "job_progress"
     job_id: str
     fence_token: int = 0
-    progress: Optional[float] = None
-    status_message: Optional[str] = None
+    progress: float | None = None
+    status_message: str | None = None
 
 
 class JobRevoked(BaseModel):
@@ -63,39 +63,39 @@ class JobRevoked(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str
-    content: Optional[str] = None
+    content: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage]
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    top_p: Optional[float] = None
-    stop: Optional[list[str] | str] = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    top_p: float | None = None
+    stop: list[str] | str | None = None
 
 
 class EmbeddingsRequest(BaseModel):
     model: str
     input: str | list[str]
-    encoding_format: Optional[str] = None
-    dimensions: Optional[int] = None
+    encoding_format: str | None = None
+    dimensions: int | None = None
 
 
 class AudioSpeechRequest(BaseModel):
     model: str
     input: str
     voice: str
-    response_format: Optional[str] = "mp3"
-    speed: Optional[float] = 1.0
+    response_format: str | None = "mp3"
+    speed: float | None = 1.0
 
 
 class ImageGenerationRequest(BaseModel):
-    model: Optional[str] = None
+    model: str | None = None
     prompt: str
-    n: Optional[int] = 1
-    size: Optional[str] = "1024x1024"
-    response_format: Optional[str] = "url"
+    n: int | None = 1
+    size: str | None = "1024x1024"
+    response_format: str | None = "url"
 
 
 # =============================================================================
@@ -103,7 +103,7 @@ class ImageGenerationRequest(BaseModel):
 # =============================================================================
 
 
-class JobStatus(str, Enum):
+class JobStatus(StrEnum):
     pending = "pending"
     running = "running"
     completed = "completed"
@@ -115,7 +115,7 @@ class Job(BaseModel):
     config_id: str
     status: JobStatus = JobStatus.pending
     payload: Any = {}
-    result: Optional[Any] = None
-    error: Optional[str] = None
+    result: Any | None = None
+    error: str | None = None
     fence_token: int = 0
     created_at: float = 0.0
